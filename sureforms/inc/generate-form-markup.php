@@ -454,6 +454,74 @@ class Generate_Form_Markup {
 				<h2 class="srfm-form-title"><?php echo esc_html( $title ); ?></h2>
 				<?php
 			}
+
+			// Password protected form check.
+			if ( $post && post_password_required( $post ) ) {
+				// Define allowed HTML tags for password form output.
+				$allowed_password_form_tags = [
+					'form'   => [
+						'action' => true,
+						'method' => true,
+						'class'  => true,
+						'id'     => true,
+					],
+					'label'  => [
+						'for'   => true,
+						'class' => true,
+					],
+					'input'  => [
+						'type'        => true,
+						'name'        => true,
+						'id'          => true,
+						'class'       => true,
+						'value'       => true,
+						'size'        => true,
+						'placeholder' => true,
+						'required'    => true,
+					],
+					'p'      => [
+						'class' => true,
+						'style' => true,
+					],
+					'button' => [
+						'type'  => true,
+						'name'  => true,
+						'class' => true,
+						'id'    => true,
+						'style' => true,
+					],
+					'div'    => [
+						'class' => true,
+						'id'    => true,
+						'style' => true,
+					],
+					'span'   => [
+						'class'       => true,
+						'aria-hidden' => true,
+					],
+					'svg'    => [
+						'xmlns'   => true,
+						'width'   => true,
+						'height'  => true,
+						'viewBox' => true,
+						'fill'    => true,
+					],
+					'path'   => [
+						'd'               => true,
+						'stroke'          => true,
+						'stroke-opacity'  => true,
+						'stroke-width'    => true,
+						'stroke-linecap'  => true,
+						'stroke-linejoin' => true,
+					],
+				];
+				echo wp_kses( get_the_password_form( $post ), $allowed_password_form_tags );
+				?>
+				</div>
+				<?php
+				return ob_get_clean();
+			}
+
 			?>
 				<form method="post" enctype="multipart/form-data" id="srfm-form-<?php echo esc_attr( Helper::get_string_value( $id ) ); ?>" class="srfm-form <?php echo esc_attr( 'sureforms_form' === $post_type ? 'srfm-single-form ' : '' ); ?>"
 				form-id="<?php echo esc_attr( Helper::get_string_value( $id ) ); ?>" after-submission="<?php echo esc_attr( $submission_action ); ?>" message-type="<?php echo esc_attr( $confirmation_type ? $confirmation_type : 'same page' ); ?>" success-url="<?php echo esc_attr( $success_url ? $success_url : '' ); ?>" ajaxurl="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>" data-nonce="<?php echo esc_attr( wp_create_nonce( 'unique_validation_nonce' ) ); ?>"
@@ -538,6 +606,25 @@ class Generate_Form_Markup {
 						</div>
 					</div>
 					<?php
+
+					echo wp_kses_post(
+						apply_filters(
+							'srfm_after_submit_button_content',
+							'',
+							[
+								'id'                      => $id,
+								'should_show_submit_button' => $should_show_submit_button,
+								'button_text'             => $button_text,
+								'submit_button_alignment' => $submit_button_alignment,
+								'full'                    => $full,
+								'btn_from_theme'          => $btn_from_theme,
+								'is_page_break'           => $is_page_break,
+								'recaptcha_version'       => $recaptcha_version,
+								'google_captcha_site_key' => $google_captcha_site_key,
+								'srfm_button_classes'     => $srfm_button_classes,
+							]
+						)
+					);
 		}
 				self::common_error_message( 'footer' );
 		?>
@@ -674,8 +761,19 @@ class Generate_Form_Markup {
 			return $confirmation_message;
 		}
 
-		$form_confirmation = isset( $form_data['form-id'] ) ?
-			get_post_meta( Helper::get_integer_value( $form_data['form-id'] ), '_srfm_form_confirmation' ) : null;
+		$form_id           = isset( $form_data['form-id'] ) ? Helper::get_integer_value( $form_data['form-id'] ) : 0;
+		$form_confirmation = get_post_meta( $form_id, '_srfm_form_confirmation' );
+
+		/**
+		 * Filter the form confirmation data.
+		 * Allows conditional confirmations to override the default confirmation settings.
+		 *
+		 * @param mixed $form_confirmation The form confirmation data from post meta.
+		 * @param int   $form_id The form ID.
+		 * @param array $submission_data The submission data.
+		 * @since 2.4.0
+		 */
+		$form_confirmation = apply_filters( 'srfm_form_confirmation_data', $form_confirmation, $form_id, $submission_data );
 
 		if ( ! is_array( $form_confirmation ) ) {
 			return $confirmation_message;
@@ -721,8 +819,19 @@ class Generate_Form_Markup {
 			return $redirect_url;
 		}
 
-		$form_confirmation = isset( $form_data['form-id'] ) ?
-			get_post_meta( Helper::get_integer_value( $form_data['form-id'] ), '_srfm_form_confirmation' ) : null;
+		$form_id           = isset( $form_data['form-id'] ) ? Helper::get_integer_value( $form_data['form-id'] ) : 0;
+		$form_confirmation = get_post_meta( $form_id, '_srfm_form_confirmation' );
+
+		/**
+		 * Filter the form confirmation data.
+		 * Allows conditional confirmations to override the default confirmation settings.
+		 *
+		 * @param mixed $form_confirmation The form confirmation data from post meta.
+		 * @param int   $form_id The form ID.
+		 * @param array $submission_data The submission data.
+		 * @since 2.4.0
+		 */
+		$form_confirmation = apply_filters( 'srfm_form_confirmation_data', $form_confirmation, $form_id, $submission_data );
 
 		if ( ! is_array( $form_confirmation ) ) {
 			return $redirect_url;
@@ -733,10 +842,11 @@ class Generate_Form_Markup {
 		$page_url          = $confirmation_data['page_url'] ?? '';
 		$custom_url        = $confirmation_data['custom_url'] ?? '';
 		$confirmation_type = $confirmation_data['confirmation_type'] ?? '';
+
 		if ( 'different page' === $confirmation_type ) {
-			$redirect_url = esc_url( $page_url );
+			$redirect_url = esc_url_raw( $page_url );
 		} elseif ( 'custom url' === $confirmation_type ) {
-			$redirect_url = esc_url( $custom_url );
+			$redirect_url = esc_url_raw( $custom_url );
 		}
 
 		if ( empty( $redirect_url ) ) {
@@ -754,7 +864,7 @@ class Generate_Form_Markup {
 		$query_params = [];
 		foreach ( $confirmation_data['query_params'] as $params ) {
 			if ( is_array( $params ) && ! empty( array_keys( $params ) ) && ! empty( array_values( $params ) ) ) {
-				$query_params[ esc_attr( array_keys( $params )[0] ) ] = esc_attr( array_values( $params )[0] );
+				$query_params[ sanitize_text_field( array_keys( $params )[0] ) ] = sanitize_text_field( array_values( $params )[0] );
 			}
 		}
 
@@ -767,6 +877,6 @@ class Generate_Form_Markup {
 			$redirect_url                    = html_entity_decode( Helper::get_string_value( $smart_tags->process_smart_tags( $redirect_url, $submission_data, $form_data ) ) );
 		}
 
-		return esc_url( apply_filters( 'srfm_after_submit_redirect_url', $redirect_url ) );
+		return esc_url_raw( apply_filters( 'srfm_after_submit_redirect_url', $redirect_url ) );
 	}
 }

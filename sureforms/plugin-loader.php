@@ -10,6 +10,7 @@ namespace SRFM;
 
 use SRFM\Admin\Admin;
 use SRFM\Admin\Analytics;
+use SRFM\Admin\Notice_Manager;
 use SRFM\Inc\Activator;
 use SRFM\Inc\Admin_Ajax;
 use SRFM\Inc\AI_Form_Builder\AI_Auth;
@@ -21,6 +22,7 @@ use SRFM\Inc\Blocks\Register;
 use SRFM\Inc\Compatibility\Themes\Astra;
 use SRFM\Inc\Create_New_Form;
 use SRFM\Inc\Database\Register as DatabaseRegister;
+use SRFM\Inc\Duplicate_Form;
 use SRFM\Inc\Events_Scheduler;
 use SRFM\Inc\Export;
 use SRFM\Inc\Form_Restriction;
@@ -36,6 +38,7 @@ use SRFM\Inc\Lib\SRFM_Nps_Survey;
 use SRFM\Inc\Nps_Notice;
 use SRFM\Inc\Onboarding;
 use SRFM\Inc\Page_Builders\Page_Builders;
+use SRFM\Inc\Payments\Payments;
 use SRFM\Inc\Post_Types;
 use SRFM\Inc\Rest_Api;
 use SRFM\Inc\Single_Form_Settings\Compliance_Settings;
@@ -207,7 +210,11 @@ class Plugin_Loader {
 		Register::get_instance();
 		if ( is_admin() ) {
 			Admin::get_instance();
+			// phpcs:ignore /** @phpstan-ignore-next-line */ -- Class is loaded dynamically in WordPress
+			Notice_Manager::get_instance();
 		}
+		Payments::get_instance();
+		Duplicate_Form::get_instance();
 	}
 
 	/**

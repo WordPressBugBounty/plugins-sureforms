@@ -48,7 +48,38 @@ class Field_Validation {
 				continue;
 			}
 
-			$block_id = sanitize_text_field( $block['attrs']['block_id'] );
+			$block_id   = sanitize_text_field( $block['attrs']['block_id'] );
+			$block_name = $block['blockName'];
+
+			// Process specific block types.
+			$processed_config = null;
+
+			switch ( $block_name ) {
+				case 'srfm/payment':
+					$processed_config = self::process_payment_block( $block['attrs'], $blocks );
+					break;
+				case 'srfm/dropdown':
+					$processed_config = self::process_dropdown_block( $block['attrs'] );
+					break;
+				case 'srfm/multi-choice':
+					$processed_config = self::process_multichoice_block( $block['attrs'] );
+					break;
+				case 'srfm/number':
+					$processed_config = self::process_number_block( $block['attrs'] );
+					break;
+			}
+
+			// If block was processed, store its configuration.
+			if ( null !== $processed_config && ! empty( $processed_config ) ) {
+				$processed_config['block_name'] = $block_name;
+				// Add the slug to the configuration.
+				if ( isset( $block['attrs']['slug'] ) && ! empty( $block['attrs']['slug'] ) ) {
+					$processed_config['slug'] = sanitize_text_field( $block['attrs']['slug'] );
+				}
+
+				$block_config[ $block_id ] = $processed_config;
+				continue;
+			}
 
 			// Allow extensions to process and modify block config.
 			$config = apply_filters( 'srfm_block_config', [ 'block' => $block ] );
@@ -139,7 +170,16 @@ class Field_Validation {
 				if ( isset( $block['blockName'] ) ) {
 					// 'name_with_id' is used as a unique field identifier for validation.
 					// Example: 'sureforms-input-abc123' for blockName 'sureforms/input' and block_id 'abc123'
-					$get_form_config[ $index ]['name_with_id'] = str_replace( '/', '-', $block['blockName'] ) . '-' . $index;
+					$name_with_id = str_replace( '/', '-', $block['blockName'] ) . '-' . $index;
+
+					// Allow custom filter based on block type.
+					$name_with_id = apply_filters(
+						'srfm_block_config_name_with_id',
+						$name_with_id,
+						$block
+					);
+
+					$get_form_config[ $index ]['name_with_id'] = $name_with_id;
 				}
 			}
 		}
@@ -238,5 +278,176 @@ class Field_Validation {
 		// Return the array of invalid fields and their error messages.
 		// Example: [ 'srfm-email-c867d9d9-lbl-email' => 'This field is required.' ].
 		return $not_valid_fields;
+	}
+
+	/**
+	 * Process payment block configuration.
+	 *
+	 * @param array<mixed> $attrs Block attributes.
+	 * @param array<mixed> $blocks All blocks.
+	 * @return array Processed payment configuration.
+	 * @since 2.3.0
+	 */
+	private static function process_payment_block( $attrs, $blocks ) {
+		$payment_config = [];
+
+		// Extract payment type (single or subscription).
+		$payment_config['payment_type'] = isset( $attrs['paymentType'] ) && is_string( $attrs['paymentType'] ) ? sanitize_text_field( $attrs['paymentType'] ) : 'one-time';
+
+		// Extract amount type (fixed or minimum).
+		$payment_config['amount_type'] = isset( $attrs['amountType'] ) && is_string( $attrs['amountType'] ) ? sanitize_text_field( $attrs['amountType'] ) : 'fixed';
+
+		$payment_config['fixed_amount'] = isset( $attrs['fixedAmount'] ) ? floatval( $attrs['fixedAmount'] ) : 10;
+
+		$payment_config['minimum_amount'] = isset( $attrs['minimumAmount'] ) ? floatval( $attrs['minimumAmount'] ) : 0;
+
+		// Extract variable amount field reference.
+		if ( isset( $attrs['variableAmountField'] ) ) {
+			$variable_amount_slug                    = sanitize_text_field( $attrs['variableAmountField'] );
+			$payment_config['variable_amount_field'] = $variable_amount_slug;
+
+			// Find and add the block name from which the variable amount field comes from.
+			if ( ! empty( $variable_amount_slug ) && is_array( $blocks ) ) {
+				foreach ( $blocks as $block ) {
+					if ( isset( $block['attrs']['slug'] ) && $block['attrs']['slug'] === $variable_amount_slug ) {
+						$payment_config['variable_amount_field_block_name'] = $block['blockName'];
+						break;
+					}
+				}
+			}
+		}
+
+		return $payment_config;
+	}
+
+	/**
+	 * Process dropdown block configuration.
+	 *
+	 * @param array<mixed> $attrs Block attributes.
+	 * @return array Processed dropdown configuration.
+	 * @since 2.3.0
+	 */
+	private static function process_dropdown_block( $attrs ) {
+		$dropdown_config = [];
+
+		// Extract required field.
+		$dropdown_config['required'] = isset( $attrs['required'] ) && ! empty( $attrs['required'] ) ? true : false;
+
+		// Extract options with their full structure (label, icon, value).
+		if ( isset( $attrs['options'] ) && is_array( $attrs['options'] ) ) {
+			$sanitized_options = [];
+			foreach ( $attrs['options'] as $option ) {
+				if ( is_array( $option ) ) {
+					$sanitized_options[] = [
+						'label' => isset( $option['label'] ) ? sanitize_text_field( $option['label'] ) : '',
+						'icon'  => isset( $option['icon'] ) ? sanitize_text_field( $option['icon'] ) : '',
+						'value' => isset( $option['value'] ) ? sanitize_text_field( $option['value'] ) : '',
+					];
+				}
+			}
+			$dropdown_config['options'] = $sanitized_options;
+		}
+
+		// Extract showValues flag.
+		$dropdown_config['show_values'] = isset( $attrs['showValues'] ) ? rest_sanitize_boolean( $attrs['showValues'] ) : false;
+
+		// Extract multiSelect flag.
+		if ( isset( $attrs['multiSelect'] ) ) {
+			$dropdown_config['multi_select'] = rest_sanitize_boolean( $attrs['multiSelect'] );
+		}
+
+		// Extract minValue for multi-select validation.
+		if ( isset( $attrs['minValue'] ) ) {
+			$dropdown_config['min_value'] = absint( $attrs['minValue'] );
+		}
+
+		// Extract maxValue for multi-select validation.
+		if ( isset( $attrs['maxValue'] ) ) {
+			$dropdown_config['max_value'] = absint( $attrs['maxValue'] );
+		}
+
+		return $dropdown_config;
+	}
+
+	/**
+	 * Process multi-choice block configuration.
+	 *
+	 * @param array<mixed> $attrs Block attributes.
+	 * @return array Processed multi-choice configuration.
+	 * @since 2.3.0
+	 */
+	private static function process_multichoice_block( $attrs ) {
+		$multichoice_config = [];
+
+		// Extract required field.
+		$multichoice_config['required'] = isset( $attrs['required'] ) && ! empty( $attrs['required'] ) ? true : false;
+
+		// Extract singleSelection flag.
+		if ( isset( $attrs['singleSelection'] ) ) {
+			$multichoice_config['single_selection'] = rest_sanitize_boolean( $attrs['singleSelection'] );
+		}
+
+		// Extract minValue for validation.
+		if ( isset( $attrs['minValue'] ) ) {
+			$multichoice_config['min_value'] = absint( $attrs['minValue'] );
+		}
+
+		// Extract maxValue for validation.
+		if ( isset( $attrs['maxValue'] ) ) {
+			$multichoice_config['max_value'] = absint( $attrs['maxValue'] );
+		}
+
+		// Extract options with their full structure (label, icon, value).
+		if ( isset( $attrs['options'] ) && is_array( $attrs['options'] ) ) {
+			$sanitized_options = [];
+			foreach ( $attrs['options'] as $option ) {
+				if ( is_array( $option ) ) {
+					$sanitized_options[] = [
+						'label' => isset( $option['optionTitle'] ) ? trim( sanitize_text_field( $option['optionTitle'] ) ) : '',
+						'icon'  => isset( $option['icon'] ) ? sanitize_text_field( $option['icon'] ) : '',
+						'value' => isset( $option['value'] ) ? sanitize_text_field( $option['value'] ) : '',
+					];
+				}
+			}
+			$multichoice_config['options'] = $sanitized_options;
+		}
+
+		// Extract showValues flag.
+		if ( isset( $attrs['showValues'] ) ) {
+			$multichoice_config['show_values'] = rest_sanitize_boolean( $attrs['showValues'] );
+		}
+
+		return $multichoice_config;
+	}
+
+	/**
+	 * Process number block configuration.
+	 *
+	 * @param array<mixed> $attrs Block attributes.
+	 * @return array Processed number configuration.
+	 * @since 2.4.0
+	 */
+	private static function process_number_block( $attrs ) {
+		$number_config = [];
+
+		// Extract required field.
+		if ( isset( $attrs['required'] ) ) {
+			$number_config['required'] = ! empty( $attrs['required'] ) ? true : false;
+		}
+
+		// Extract format type (us-style or eu-style).
+		$number_config['format_type'] = isset( $attrs['formatType'] ) && is_string( $attrs['formatType'] ) ? sanitize_text_field( $attrs['formatType'] ) : 'us-style';
+
+		// Extract min value.
+		if ( isset( $attrs['min'] ) ) {
+			$number_config['min'] = floatval( $attrs['min'] );
+		}
+
+		// Extract max value.
+		if ( isset( $attrs['max'] ) ) {
+			$number_config['max'] = floatval( $attrs['max'] );
+		}
+
+		return $number_config;
 	}
 }

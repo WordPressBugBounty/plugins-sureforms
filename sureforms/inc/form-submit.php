@@ -259,11 +259,24 @@ class Form_Submit {
 		$form_id = Helper::get_integer_value( $current_form_id );
 		if ( Form_Restriction::is_form_restricted( $form_id ) ) {
 			$form_restriction = Form_Restriction::get_form_restriction_setting( $form_id );
-			// If the form is restricted, return an error response.
-			$form_restriction_message = $form_restriction['message'] ?? Translatable::get_default_form_restriction_message();
+
+			// Get the scheduling state and appropriate message.
+			$scheduling_state         = Form_Restriction::get_form_scheduling_state( $form_restriction );
+			$form_restriction_message = Form_Restriction::get_restriction_message_by_state( $scheduling_state, $form_restriction );
+
+			$form_restriction_message = apply_filters( 'srfm_form_restriction_message', $form_restriction_message, $form_id, $form_restriction );
+
 			wp_send_json_error(
 				[
 					'message' => $form_restriction_message,
+				]
+			);
+		}
+
+		if ( apply_filters( 'srfm_additional_restriction_check', false, $form_id, $form_data ) ) {
+			wp_send_json_error(
+				[
+					'message' => apply_filters( 'srfm_additional_restriction_message', __( 'Form submission is restricted.', 'sureforms' ), $form_id, $form_data ),
 				]
 			);
 		}
@@ -281,9 +294,12 @@ class Form_Submit {
 		$validated_form_data = Field_Validation::validate_form_data( $form_data, $current_form_id );
 
 		if ( ! empty( $validated_form_data ) ) {
+			// Get the first error message to display as the main message.
+			$first_error = reset( $validated_form_data );
+
 			wp_send_json_error(
 				[
-					'message'      => __( 'Form data is not valid.', 'sureforms' ),
+					'message'      => $first_error ?? __( 'Form data is not valid.', 'sureforms' ),
 					'field_errors' => $validated_form_data,
 				]
 			);
@@ -604,9 +620,10 @@ class Form_Submit {
 				'success'      => true,
 				'message'      => $confirmation_message,
 				'data'         => [
-					'name'          => $name,
-					'submission_id' => $entry_id,
-					'after_submit'  => true,
+					'name'               => $name,
+					'submission_id'      => $entry_id,
+					'after_submit'       => true,
+					'after_submit_nonce' => wp_create_nonce( 'srfm_after_submission_' . Helper::get_string_value( $entry_id ) ),
 				],
 				'redirect_url' => Generate_Form_Markup::get_redirect_url( $form_data, $submission_data ),
 			];
@@ -632,7 +649,15 @@ class Form_Submit {
 			];
 		}
 
-		return $response;
+		/**
+		 * Filter the form submission response.
+		 *
+		 * @param array<mixed> $response The response data.
+		 * @param array<string> $form_data The original form data.
+		 * @param array<mixed> $submission_data The processed submission data.
+		 * @since 2.4.0
+		 */
+		return apply_filters( 'srfm_form_submission_response', $response, $form_data, $submission_data );
 	}
 
 	/**
@@ -735,14 +760,19 @@ class Form_Submit {
 		// Add the From: to the headers.
 		$headers .= self::add_from_data_in_header( $submission_data, $item, $smart_tags );
 
+		// Handle Reply-To with proper sanitization.
 		if ( isset( $item['email_reply_to'] ) && ! empty( $item['email_reply_to'] ) ) {
-			$headers .= 'Reply-To:' . esc_html( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_reply_to'], $submission_data ) ) ) . "\r\n";
+			$headers .= 'Reply-To: ' . Helper::sanitize_email_header( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_reply_to'], $submission_data ) ) ) . "\r\n";
 		}
+
+		// Handle CC with proper sanitization.
 		if ( isset( $item['email_cc'] ) && ! empty( $item['email_cc'] ) ) {
-			$headers .= 'Cc:' . esc_html( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_cc'], $submission_data ) ) ) . "\r\n";
+			$headers .= 'Cc: ' . Helper::sanitize_email_header( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_cc'], $submission_data ) ) ) . "\r\n";
 		}
+
+		// Handle BCC with proper sanitization.
 		if ( isset( $item['email_bcc'] ) && ! empty( $item['email_bcc'] ) ) {
-			$headers .= 'Bcc:' . esc_html( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_bcc'], $submission_data ) ) ) . "\r\n";
+			$headers .= 'Bcc: ' . Helper::sanitize_email_header( Helper::get_string_value( $smart_tags->process_smart_tags( $item['email_bcc'], $submission_data ) ) ) . "\r\n";
 		}
 
 		return compact( 'to', 'subject', 'message', 'headers' );
@@ -844,18 +874,29 @@ class Form_Submit {
 									]
 								);
 							} else {
+								$reason = ! empty( $email_report )
+									? esc_html( $email_report )
+									: ( ! Helper::is_any_smtp_plugin_active()
+									? esc_html__( 'No SMTP plugin detected. Please configure one to enable email sending.', 'sureforms' )
+									: esc_html__( 'The failure occurred due to an undetermined cause.', 'sureforms' )
+									);
+
 								$entries_db_instance->update_log(
 									$log_key,
 									null,
 									[
 										sprintf(
-											/* translators: Here, %1$s is the comma separated emails list and %2$s is error report ( if any ). */
-											__( 'Email server was unable to send the email notification. Recipient: %1$s. Reason: %2$s', 'sureforms' ),
+										/* translators: Here, %1$s is the comma separated emails list and %2$s is error report ( if any ). */
+											__(
+												'Email server was unable to send the email notification. Recipient: %1$s. Reason: %2$s',
+												'sureforms'
+											),
 											esc_html( $parsed['to'] ),
-											! empty( $email_report ) ? esc_html( $email_report ) : esc_html__( 'Unknown', 'sureforms' )
+											$reason
 										),
 									]
 								);
+
 							}
 						}
 

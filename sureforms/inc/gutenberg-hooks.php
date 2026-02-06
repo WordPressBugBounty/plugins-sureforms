@@ -48,7 +48,7 @@ class Gutenberg_Hooks {
 		// Initializing hooks.
 		add_action( 'enqueue_block_editor_assets', [ $this, 'form_editor_screen_assets' ] );
 		add_action( 'enqueue_block_editor_assets', [ $this, 'block_editor_assets' ] );
-		add_filter( 'block_categories_all', [ $this, 'register_block_categories' ], 10, 1 );
+		add_filter( 'block_categories_all', [ $this, 'register_block_categories' ], 10, 2 );
 		add_filter( 'allowed_block_types_all', [ $this, 'disable_forms_wrapper_block' ], 10, 2 );
 		add_action( 'save_post_sureforms_form', [ $this, 'update_field_slug' ], 10, 2 );
 		add_action( 'load-post.php', [ $this, 'maybe_migrate_form_stylings' ] );
@@ -81,6 +81,7 @@ class Gutenberg_Hooks {
 				'srfm/image',
 				'srfm/advanced-heading',
 				'srfm/inline-button',
+				'srfm/payment',
 			];
 			// Apply a filter to the $allow_block_types types array.
 			return apply_filters( 'srfm_allowed_block_types', $allow_block_types, $editor_context );
@@ -93,14 +94,16 @@ class Gutenberg_Hooks {
 	/**
 	 * Register our custom block category.
 	 *
-	 * @param array<mixed> $categories Array of categories.
+	 * @param array<mixed>             $categories Array of categories.
+	 * @param \WP_Block_Editor_Context $block_editor_context The current block editor context.
 	 * @return array<mixed>
 	 * @since 0.0.1
 	 */
-	public function register_block_categories( $categories ) {
-		$screen = get_current_screen();
+	public function register_block_categories( $categories, $block_editor_context ) {
 
-		if ( $screen && SRFM_FORMS_POST_TYPE === $screen->post_type ) {
+		$post_type = $block_editor_context->post->post_type ?? '';
+
+		if ( $post_type && SRFM_FORMS_POST_TYPE === $post_type ) {
 			$title = esc_html__( 'General Fields', 'sureforms' );
 		} else {
 			$title = esc_html__( 'SureForms', 'sureforms' );
@@ -208,6 +211,10 @@ class Gutenberg_Hooks {
 				'is_admin_user'                     => Helper::current_user_can(),
 				'site_url'                          => $site_url,
 				'is_suremails_active'               => is_plugin_active( 'suremails/suremails.php' ),
+				'default_translations'              => [
+					'gdpr_label'           => __( 'I consent to have this website store my submitted information so they can respond to my inquiry.', 'sureforms' ),
+					'dropdown_placeholder' => __( 'Select an option', 'sureforms' ),
+				],
 			]
 		);
 
@@ -229,6 +236,7 @@ class Gutenberg_Hooks {
 					'dropdown_preview'     => SRFM_URL . 'images/field-previews/dropdown.svg',
 					'address_preview'      => SRFM_URL . 'images/field-previews/address.svg',
 					'sureforms_preview'    => SRFM_URL . 'images/field-previews/sureforms.svg',
+					'payment_preview'      => SRFM_URL . 'images/field-previews/payment.svg',
 				]
 			)
 		);
@@ -271,19 +279,21 @@ class Gutenberg_Hooks {
 
 		[ $blocks, $slugs, $updated ] = Helper::process_blocks( $blocks, $slugs, $updated );
 
+		// Process and store block configurations for form fields.
+		Field_Validation::add_block_config( $blocks, $post_id );
+
 		if ( ! $updated ) {
 			return;
 		}
 
-		$post_content = addslashes( serialize_blocks( $blocks ) );
+		$post_content = serialize_blocks( $blocks );
 
-		// Process and store block configurations for form fields.
-		Field_Validation::add_block_config( $blocks, $post_id );
-
+		// Use wp_slash() to preserve unicode escapes (like \u003c for <) in block attributes.
+		// Without this, wp_update_post() calls wp_unslash() which corrupts these escapes.
 		wp_update_post(
 			[
 				'ID'           => $post_id,
-				'post_content' => $post_content,
+				'post_content' => wp_slash( $post_content ),
 			]
 		);
 	}

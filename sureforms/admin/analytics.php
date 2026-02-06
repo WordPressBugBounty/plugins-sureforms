@@ -95,18 +95,25 @@ class Analytics {
 			'pointer_popup_clicked' => $this->pointer_popup_clicked(),
 		];
 		$stats_data['plugin_data']['sureforms']['numeric_values'] = [
-			'total_forms'            => wp_count_posts( SRFM_FORMS_POST_TYPE )->publish ?? 0,
-			'instant_forms_enabled'  => $this->instant_forms_enabled(),
-			'forms_using_custom_css' => $this->forms_using_custom_css(),
-			'ai_generated_forms'     => $this->ai_generated_forms(),
-			'total_entries'          => Entries::get_total_entries_by_status(),
-			'restricted_forms'       => $this->get_restricted_forms(),
+			'total_forms'                => wp_count_posts( SRFM_FORMS_POST_TYPE )->publish ?? 0,
+			'instant_forms_enabled'      => $this->instant_forms_enabled(),
+			'forms_using_custom_css'     => $this->forms_using_custom_css(),
+			'ai_generated_forms'         => $this->ai_generated_forms(),
+			'ai_generated_payment_forms' => $this->ai_generated_forms( 'payments' ),
+			'payment_forms'              => $this->get_payment_forms_count(),
+			'total_entries'              => Entries::get_total_entries_by_status(),
+			'restricted_forms'           => $this->get_restricted_forms(),
 		];
 
 		$stats_data['plugin_data']['sureforms'] = array_merge_recursive( $stats_data['plugin_data']['sureforms'], $this->global_settings_data() );
-
 		// Add onboarding analytics data.
 		$stats_data['plugin_data']['sureforms'] = array_merge_recursive( $stats_data['plugin_data']['sureforms'], $this->onboarding_analytics_data() );
+
+		// Add KPI tracking data.
+		$kpi_data = $this->get_kpi_tracking_data();
+		if ( ! empty( $kpi_data ) ) {
+			$stats_data['plugin_data']['sureforms']['kpi_records'] = $kpi_data;
+		}
 
 		return $stats_data;
 	}
@@ -132,10 +139,13 @@ class Analytics {
 	/**
 	 * Return total number of ai generated forms.
 	 *
+	 * @param string $form_type Form type to check.
+	 *
 	 * @since 1.4.0
 	 * @return int
 	 */
-	public function ai_generated_forms() {
+	public function ai_generated_forms( $form_type = '' ) {
+		$form_type  = empty( $form_type ) || ! is_string( $form_type ) ? '' : $form_type;
 		$meta_query = [
 			[
 				'key'     => '_srfm_is_ai_generated',
@@ -143,6 +153,11 @@ class Analytics {
 				'compare' => '!=', // Checks if the value is NOT empty.
 			],
 		];
+
+		if ( 'payments' === $form_type ) {
+			$search = 'wp:srfm/payment';
+			return $this->custom_wp_query_total_posts_with_search( $meta_query, $search );
+		}
 
 		return $this->custom_wp_query_total_posts( $meta_query );
 	}
@@ -277,6 +292,9 @@ class Analytics {
 
 		$validation_messages                                        = get_option( 'srfm_default_dynamic_block_option', [] );
 		$global_data['boolean_values']['custom_validation_message'] = ! empty( $validation_messages ) && is_array( $validation_messages );
+
+		// Payment analytics - check if any payment method is enabled.
+		$global_data['boolean_values']['stripe_enabled'] = $this->is_stripe_enabled();
 
 		return $global_data;
 	}
@@ -440,6 +458,72 @@ class Analytics {
 	}
 
 	/**
+	 * Runs a custom WP_Query to fetch the total number of posts matching the given meta query and optional search string.
+	 *
+	 * This function is used to count SureForms posts based on specific meta query conditions.
+	 * Optionally, a search string can be included to further filter results by keyword match.
+	 *
+	 * @since 2.0.0
+	 *
+	 * @param array  $meta_query Meta query array for WP_Query.
+	 * @param string $search     Optional. Search string for WP_Query. Default empty.
+	 * @return int               The number of matching posts.
+	 */
+	public function custom_wp_query_total_posts_with_search( $meta_query = [], $search = '' ) {
+		$args = [
+			'post_type'      => SRFM_FORMS_POST_TYPE,
+			'post_status'    => 'publish',
+			'posts_per_page' => -1,
+		];
+
+		if ( ! empty( $meta_query ) && is_array( $meta_query ) ) {
+			// phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Meta query required as we need to fetch count of nested data.
+			$args['meta_query'] = $meta_query;
+		}
+
+		// If search string is provided, add it to the query.
+		if ( ! empty( $search ) ) {
+			$args['s'] = sanitize_text_field( $search );
+		}
+
+		$query       = new \WP_Query( $args );
+		$posts_count = $query->found_posts;
+
+		wp_reset_postdata();
+
+		return $posts_count;
+	}
+
+	/**
+	 * Get the total number of forms that utilize payment blocks.
+	 *
+	 * This function searches for forms containing the payment block identifier
+	 * ('wp:srfm/payment') to determine how many forms include payment capabilities.
+	 *
+	 * @since 2.0.0
+	 * @return int The number of forms that contain payment blocks.
+	 */
+	public function get_payment_forms_count() {
+		$search = 'wp:srfm/payment';
+		// Runs a custom WP_Query to find the count of forms with payment block.
+		return $this->custom_wp_query_total_posts_with_search( [], $search );
+	}
+
+	/**
+	 * Check if any payment method is enabled.
+	 *
+	 * This function checks if any payment gateway is connected and enabled.
+	 * Currently supports Stripe, but can be extended for other payment methods in the future.
+	 *
+	 * @since 2.0.0
+	 * @return bool True if any payment method is enabled, false otherwise.
+	 */
+	private function is_stripe_enabled() {
+		// Check if Stripe is connected.
+		return class_exists( 'SRFM\Inc\Payments\Stripe\Stripe_Helper' ) && \SRFM\Inc\Payments\Stripe\Stripe_Helper::is_stripe_connected();
+	}
+
+	/**
 	 * Runs custom WP_Query to fetch data as per requirement
 	 *
 	 * @param array $meta_query meta query array for WP_Query.
@@ -462,4 +546,61 @@ class Analytics {
 
 		return $posts_count;
 	}
+
+	/**
+	 * Get KPI tracking data for the last 2 days (excluding today).
+	 *
+	 * @since 2.4.0
+	 * @return array KPI data organized by date
+	 */
+	private function get_kpi_tracking_data() {
+		$kpi_data = [];
+		$today    = current_time( 'Y-m-d' );
+
+		// Get data for yesterday and day before yesterday.
+		for ( $i = 1; $i <= 2; $i++ ) {
+			$date        = gmdate( 'Y-m-d', strtotime( $today . ' -' . $i . ' days' ) );
+			$submissions = $this->get_daily_submissions_count( $date );
+
+			// Always include data, even if submissions is 0.
+			$kpi_data[ $date ] = [
+				'numeric_values' => [
+					'submissions' => $submissions,
+				],
+			];
+		}
+
+		return $kpi_data;
+	}
+
+	/**
+	 * Get daily submissions count for a specific date.
+	 *
+	 * @param string $date Date in Y-m-d format.
+	 * @since 2.4.0
+	 * @return int Daily submissions count
+	 */
+	private function get_daily_submissions_count( $date ) {
+		$start_date = $date . ' 00:00:00';
+		$end_date   = $date . ' 23:59:59';
+
+		// Use existing Entries class methods instead of direct database queries.
+		$where_conditions = [
+			[
+				[
+					'key'     => 'created_at',
+					'compare' => '>=',
+					'value'   => $start_date,
+				],
+				[
+					'key'     => 'created_at',
+					'compare' => '<=',
+					'value'   => $end_date,
+				],
+			],
+		];
+
+		return Entries::get_instance()->get_total_count( $where_conditions );
+	}
+
 }

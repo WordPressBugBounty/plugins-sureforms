@@ -440,6 +440,9 @@ class Helper {
 			return '';
 		}
 
+		// Strip HTML tags to prevent them from being included in IDs and field names.
+		$input = wp_strip_all_tags( $input );
+
 		// Encrypt the input and return it.
 		$base_64 = base64_encode( $input ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
 		return rtrim( $base_64, '=' );
@@ -694,6 +697,37 @@ class Helper {
 			}
 			$label = explode( '-lbl-', $key )[1];
 			$slug  = implode( '-', array_slice( explode( '-', $label ), 1 ) );
+
+			/**
+			 * Filters whether a field should be skipped when mapping slugs to submission data.
+			 *
+			 * This filter allows plugins or custom code to determine if a field should be excluded
+			 * from the mapped submission data array (such as for internal fields or extraneous meta).
+			 *
+			 * @since 2.0.0
+			 *
+			 * @param bool  $skip_this_field Whether to skip this field from processing. Default false.
+			 * @param array $args {
+			 *     Arguments used for this field.
+			 *
+			 *     @type string $key   The original key of the field in the submission data array.
+			 *     @type string $slug  The mapped slug parsed from the field key.
+			 *     @type mixed  $value The value assigned to this field.
+			 * }
+			 */
+			$skip_this_field = apply_filters(
+				'srfm_map_slug_to_submission_data_should_skip',
+				false,
+				[
+					'key'   => $key,
+					'slug'  => $slug,
+					'value' => $value,
+				]
+			);
+
+			if ( $skip_this_field ) {
+				continue;
+			}
 
 			// Check if value is array to handle external package field functionality.
 			// like repeater fields that need special processing.
@@ -986,6 +1020,7 @@ class Helper {
 				'srfm/radio',
 				'srfm/submit',
 				'srfm/url',
+				'srfm/payment',
 			]
 		);
 	}
@@ -1016,6 +1051,45 @@ class Helper {
 			</span>
 		</p>
 		<?php
+	}
+
+	/**
+	 * Parse and sanitize an email list string which may contain:
+	 *
+	 * @param string $input email addresses.
+	 * @since 1.13.2
+	 * @return string Sanitized email header string.
+	 */
+	public static function sanitize_email_header( $input ) {
+		if ( empty( $input ) ) {
+			return '';
+		}
+
+		$parts  = explode( ',', $input );
+		$output = [];
+
+		foreach ( $parts as $part ) {
+			$part = trim( $part );
+
+			// Match "Name <email>".
+			if ( preg_match( '/^(.*)<(.+)>$/', $part, $matches ) ) {
+				$name  = trim( $matches[1], "\" \t\n\r\0\x0B" ); // trim quotes.
+				$email = sanitize_email( trim( $matches[2] ) );
+
+				if ( is_email( $email ) ) {
+					$safe_name = sanitize_text_field( $name );
+					$output[]  = $safe_name . ' <' . $email . '>';
+				}
+			} else {
+				// Plain email case.
+				$email = sanitize_email( $part );
+				if ( is_email( $email ) ) {
+					$output[] = $email;
+				}
+			}
+		}
+
+		return ! empty( $output ) ? implode( ', ', $output ) : '';
 	}
 
 	/**
@@ -1200,7 +1274,7 @@ class Helper {
 	 * @since 1.1.1
 	 * @return bool Returns true if all conditions are met or the single key-value pair is valid, otherwise false.
 	 */
-	public static function validate_request_context( $value, $key = 'post_type', array $conditions = [] ) {
+	public static function validate_request_context( $value, $key = 'post_type', $conditions = [] ) {
 		// If conditions are provided, validate all key-value pairs in the conditions array.
 		if ( ! empty( $conditions ) ) {
 			foreach ( $conditions as $condition_key => $condition_value ) {
@@ -1517,21 +1591,43 @@ class Helper {
 	}
 
 	/**
-	 * Check if the starter template premium plugin is installed and return its file path.
+	 * Return the first installed plugin from a list, or a default if none exist.
 	 *
-	 * @since 1.7.3
+	 * @since 2.0.0
 	 *
-	 * @return string The plugin file path if premium is installed, otherwise the default starter sites plugin file path.
+	 * @param array<string> $plugins_to_check Plugin file paths to check, in priority order.
+	 * @param string        $default          Optional fallback plugin file path. Default empty string.
+	 *
+	 * @return string First installed plugin file path, or the default.
 	 */
-	public static function check_starter_template_plugin() {
+	public static function get_plugin_if_installed( $plugins_to_check, $default = '' ) {
 		if ( ! function_exists( 'get_plugins' ) ) {
 			require_once ABSPATH . 'wp-admin/includes/plugin.php';
 		}
+
 		$plugins = get_plugins();
 
-		$premium = 'astra-pro-sites/astra-pro-sites.php';
+		foreach ( self::get_array_value( $plugins_to_check ) as $plugin_file ) {
+			if ( isset( $plugins[ $plugin_file ] ) ) {
+				return $plugin_file;
+			}
+		}
 
-		return isset( $plugins[ $premium ] ) ? $premium : 'astra-sites/astra-sites.php';
+		return $default;
+	}
+
+	/**
+	 * Check which Starter Templates plugin is installed and return its main plugin file path.
+	 *
+	 * @since 1.7.3
+	 *
+	 * @return string The main plugin file path of the installed Starter Templates plugin.
+	 */
+	public static function check_starter_template_plugin() {
+		return self::get_plugin_if_installed(
+			[ 'astra-pro-sites/astra-pro-sites.php' ],
+			'astra-sites/astra-sites.php'
+		);
 	}
 
 	/**
@@ -1549,49 +1645,163 @@ class Helper {
 		$logo_sure_mails        = file_get_contents( plugin_dir_path( SRFM_FILE ) . 'images/suremails.svg' );
 		$logo_uae               = file_get_contents( plugin_dir_path( SRFM_FILE ) . 'images/uae.svg' );
 		$logo_starter_templates = file_get_contents( plugin_dir_path( SRFM_FILE ) . 'images/starterTemplates.svg' );
-		return apply_filters(
-			'srfm_integrated_plugins',
-			[
-				'sure_mails'        => [
-					'title'       => __( 'SureMail', 'sureforms' ),
-					'subtitle'    => __( 'Free and easy SMTP mails plugin.', 'sureforms' ),
-					'status'      => self::get_plugin_status( 'suremails/suremails.php' ),
-					'slug'        => 'suremails',
-					'path'        => 'suremails/suremails.php',
-					'redirection' => admin_url( 'options-general.php?page=suremail#/dashboard' ),
-					'logo'        => self::encode_svg( is_string( $logo_sure_mails ) ? $logo_sure_mails : '' ),
-				],
-				'sure_triggers'     => [
-					'title'       => __( 'OttoKit', 'sureforms' ),
-					'subtitle'    => __( 'No-code automation tool for WordPress.', 'sureforms' ),
-					'description' => __( 'OttoKit is a powerful automation platform that helps you connect your various plugins and apps together. It allows you to automate repetitive tasks, so you can focus on more important work.', 'sureforms' ),
-					'status'      => self::get_plugin_status( 'suretriggers/suretriggers.php' ),
-					'slug'        => 'suretriggers',
-					'path'        => 'suretriggers/suretriggers.php',
-					'redirection' => admin_url( 'admin.php?page=suretriggers' ),
-					'logo'        => self::encode_svg( is_string( $logo_sure_triggers ) ? $logo_sure_triggers : '' ),
-					'logo_full'   => self::encode_svg( is_string( $logo_full ) ? $logo_full : '' ),
-					'connected'   => $suretrigger_connected,
-				],
-				'uae'               => [
-					'title'    => __( 'Ultimate Addons for Elementor', 'sureforms' ),
-					'subtitle' => __( 'Build modern websites with elementor addons.', 'sureforms' ),
-					'status'   => self::get_plugin_status( 'header-footer-elementor/header-footer-elementor.php' ),
-					'slug'     => 'header-footer-elementor',
-					'path'     => 'header-footer-elementor/header-footer-elementor.php',
-					'logo'     => self::encode_svg( is_string( $logo_uae ) ? $logo_uae : '' ),
-				],
-				'starter_templates' => [
-					'title'       => __( 'Starter Templates', 'sureforms' ),
-					'subtitle'    => __( 'Build your dream website in minutes with AI.', 'sureforms' ),
-					'status'      => self::get_plugin_status( self::check_starter_template_plugin() ),
-					'slug'        => 'astra-sites',
-					'path'        => self::check_starter_template_plugin(),
-					'redirection' => admin_url( 'admin.php?page=starter-templates' ),
-					'logo'        => self::encode_svg( is_string( $logo_starter_templates ) ? $logo_starter_templates : '' ),
-				],
-			]
-		);
+		$logo_sure_rank         = file_get_contents( plugin_dir_path( SRFM_FILE ) . 'images/surerank.svg' );
+		$logo_sure_contact      = file_get_contents( plugin_dir_path( SRFM_FILE ) . 'images/surecontact.svg' );
+
+		$integrations = [
+			'sure_contact'      => [
+				'title'                 => __( 'SureContact', 'sureforms' ),
+				'singleLineDescription' => __( 'Turn Emails Into Revenue with a CRM Built for Your Website!', 'sureforms' ),
+				'subtitle'              => __( 'Send newsletters, run campaigns, set up automations, manage contacts, and see exactly how much revenue your emails generate, all in one place.', 'sureforms' ),
+				'status'                => self::get_plugin_status( 'surecontact/surecontact.php' ),
+				'slug'                  => 'surecontact',
+				'path'                  => 'surecontact/surecontact.php',
+				'logo'                  => self::encode_svg( is_string( $logo_sure_contact ) ? $logo_sure_contact : '' ),
+			],
+			'sure_mails'        => [
+				'title'                 => __( 'SureMail', 'sureforms' ),
+				'singleLineDescription' => __( 'Boost Your Email Deliverability Instantly!', 'sureforms' ),
+				'subtitle'              => __( 'Access a powerful, easy-to-use email delivery service that ensures your emails land in inboxes, not spam folders. Automate your WordPress email workflows confidently with SureMail.', 'sureforms' ),
+				'status'                => self::get_plugin_status( 'suremails/suremails.php' ),
+				'slug'                  => 'suremails',
+				'path'                  => 'suremails/suremails.php',
+				'logo'                  => self::encode_svg( is_string( $logo_sure_mails ) ? $logo_sure_mails : '' ),
+			],
+			'sure_triggers'     => [
+				'title'                 => __( 'OttoKit', 'sureforms' ),
+				'singleLineDescription' => __( 'Automate your WordPress workflows effortlessly.', 'sureforms' ),
+				'subtitle'              => __( 'Connect your WordPress plugins and favourite apps, automate tasks, and sync data effortlessly using OttoKit’s clean, visual workflow builder — no coding or complex setup required.', 'sureforms' ),
+				'status'                => self::get_plugin_status( 'suretriggers/suretriggers.php' ),
+				'slug'                  => 'suretriggers',
+				'path'                  => 'suretriggers/suretriggers.php',
+				'logo'                  => self::encode_svg( is_string( $logo_sure_triggers ) ? $logo_sure_triggers : '' ),
+				'logo_full'             => self::encode_svg( is_string( $logo_full ) ? $logo_full : '' ),
+				'connected'             => $suretrigger_connected,
+				'connection_url'        => admin_url( 'admin.php?page=suretriggers' ),
+			],
+			'starter_templates' => [
+				'title'                 => __( 'Starter Templates', 'sureforms' ),
+				'singleLineDescription' => __( 'Launch Beautiful Websites in Minutes!', 'sureforms' ),
+				'subtitle'              => __( 'Choose from professionally designed templates, import with one click, and customize effortlessly to match your brand.', 'sureforms' ),
+				'status'                => self::get_plugin_status( self::check_starter_template_plugin() ),
+				'slug'                  => 'astra-sites',
+				'path'                  => self::check_starter_template_plugin(),
+				'logo'                  => self::encode_svg( is_string( $logo_starter_templates ) ? $logo_starter_templates : '' ),
+			],
+		];
+
+		$elementor_installed = self::get_plugin_if_installed( [ 'elementor/elementor.php' ] );
+
+		if ( $elementor_installed ) {
+			$integrations['uae'] = [
+				'title'                 => __( 'Ultimate Addons for Elementor', 'sureforms' ),
+				'singleLineDescription' => __( 'Power Up Elementor to Build Stunning Websites Faster!', 'sureforms' ),
+				'subtitle'              => __( 'Enhance Elementor with powerful widgets and templates. Build stunning, high-performing websites faster with creative design elements and seamless customization.', 'sureforms' ),
+				'status'                => self::get_plugin_status( 'header-footer-elementor/header-footer-elementor.php' ),
+				'slug'                  => 'header-footer-elementor',
+				'path'                  => 'header-footer-elementor/header-footer-elementor.php',
+				'logo'                  => self::encode_svg( is_string( $logo_uae ) ? $logo_uae : '' ),
+			];
+		} else {
+			$integrations['sure_rank'] = [
+				'title'                 => __( 'SureRank', 'sureforms' ),
+				'singleLineDescription' => __( 'Elevate Your SEO and Climb Search Rankings Effortlessly!', 'sureforms' ),
+				'subtitle'              => __( 'Boost your website\'s visibility with smart SEO automation. Optimize content, track keyword performance, and get actionable insights, all inside WordPress.', 'sureforms' ),
+				'status'                => self::get_plugin_status( 'surerank/surerank.php' ),
+				'slug'                  => 'surerank',
+				'path'                  => 'surerank/surerank.php',
+				'logo'                  => self::encode_svg( is_string( $logo_sure_rank ) ? $logo_sure_rank : '' ),
+			];
+		}
+
+		return apply_filters( 'srfm_integrated_plugins', $integrations );
+	}
+
+	/**
+	 * Get the current rotating plugin for the banner.
+	 *
+	 * Plugins rotate every 2 days. Only non-activated plugins are shown.
+	 * Returns false if all plugins are activated.
+	 *
+	 * @since 2.0.0
+	 * @return array<string, mixed>|false The current plugin data or false if all plugins are activated.
+	 */
+	public static function get_rotating_plugin_banner() {
+		$all_plugins = self::sureforms_get_integration();
+
+		if ( ! is_array( $all_plugins ) ) {
+			return false;
+		}
+
+		$available_plugins = [];
+
+		// Only include non-activated plugins.
+		foreach ( $all_plugins as $plugin ) {
+			if ( ! is_array( $plugin ) ) {
+				continue;
+			}
+			if ( isset( $plugin['status'] ) && is_string( $plugin['status'] ) && 'Activated' !== $plugin['status'] ) {
+				$available_plugins[] = $plugin;
+			}
+		}
+
+		// Re-index the array to have sequential numeric keys.
+		$available_plugins = array_values( $available_plugins );
+		$total_plugins     = count( $available_plugins );
+
+		// Hide section if all plugins are active.
+		if ( 0 === $total_plugins ) {
+			return false;
+		}
+
+		// Get stored rotation data.
+		$rotation_data = self::get_srfm_option( 'plugin_banner_rotation', [] );
+
+		if ( ! is_array( $rotation_data ) ) {
+			$rotation_data = [];
+		}
+
+		// Initialize rotation data if empty.
+		if ( empty( $rotation_data ) ) {
+			$current_time = time();
+			self::update_srfm_option(
+				'plugin_banner_rotation',
+				[
+					'last_rotation_date' => $current_time,
+					'plugin_index'       => 0,
+				]
+			);
+			return isset( $available_plugins[0] ) && is_array( $available_plugins[0] ) ? $available_plugins[0] : false;
+		}
+
+		$last_rotation_date = isset( $rotation_data['last_rotation_date'] ) && is_int( $rotation_data['last_rotation_date'] ) ? $rotation_data['last_rotation_date'] : 0;
+		$plugin_index       = isset( $rotation_data['plugin_index'] ) && is_numeric( $rotation_data['plugin_index'] ) ? intval( $rotation_data['plugin_index'] ) : 0;
+
+		$current_time        = time();
+		$days_since_rotation = ( $current_time - $last_rotation_date ) / DAY_IN_SECONDS;
+
+		// Rotate every 2 days.
+		if ( $days_since_rotation >= 2 ) {
+			// Rotate to next plugin.
+			++$plugin_index;
+			$plugin_index %= $total_plugins;
+
+			// Update the rotation data.
+			self::update_srfm_option(
+				'plugin_banner_rotation',
+				[
+					'last_rotation_date' => $current_time,
+					'plugin_index'       => $plugin_index,
+				]
+			);
+		}
+
+		// Ensure the index is within bounds.
+		if ( $plugin_index >= $total_plugins ) {
+			$plugin_index = 0;
+		}
+
+		return isset( $available_plugins[ $plugin_index ] ) && is_array( $available_plugins[ $plugin_index ] ) ? $available_plugins[ $plugin_index ] : false;
 	}
 
 	/**
@@ -1899,10 +2109,13 @@ class Helper {
 	/**
 	 * Get the timestamp from a string.
 	 *
-	 * @param string $date The date in a specific format (e.g., '2025.10.01').
-	 * @param string $hours The hours in a specific format (e.g., '12').
-	 * @param string $minutes The minutes in a specific format (e.g., '00').
-	 * @param string $meridiem The meridiem in a specific format (e.g., 'AM' or 'PM').
+	 * This function uses WordPress's configured timezone (from Settings → General → Timezone)
+	 * to ensure consistent behavior regardless of the server's timezone settings.
+	 *
+	 * @param string $date The date in YYYY-MM-DD format (e.g., '2026-01-10').
+	 * @param string $hours The hours in 12-hour format (e.g., '12', '01'-'12').
+	 * @param string $minutes The minutes (e.g., '00', '00'-'59').
+	 * @param string $meridiem The meridiem (e.g., 'AM' or 'PM').
 	 *
 	 * @since 1.10.1
 	 * @return int|false The timestamp if successful, false otherwise.
@@ -1920,14 +2133,93 @@ class Helper {
 
 		$time_string = $date . ' ' . $hours . ':' . $minutes . ' ' . $meridiem;
 
-		// Convert to timestamp.
-		$timestamp = strtotime( $time_string );
+		// Convert to timestamp using WordPress timezone.
+		// This ensures the date/time is interpreted in the site's configured timezone,
+		// not the server's timezone or PHP's default timezone.
+		try {
+			$datetime = date_create( $time_string, wp_timezone() );
 
-		if ( false !== $timestamp && is_int( $timestamp ) && $timestamp > 0 ) {
-			return $timestamp;
+			if ( false === $datetime ) {
+				return false;
+			}
+
+			$timestamp = $datetime->getTimestamp();
+
+			if ( is_int( $timestamp ) && $timestamp > 0 ) {
+				return $timestamp;
+			}
+		} catch ( \Exception $e ) {
+			// If timezone conversion fails, return false.
+			return false;
 		}
 
 		// If conversion fails, return false.
 		return false;
+	}
+
+	/**
+	 * Generate a unique ID for the saved form.
+	 * Also ensures that the generated ID does not already exist in the database table.
+	 *
+	 * @param class-string $class  The class name where the get method is defined to check for existing IDs.
+	 * @param int<1, max>  $length The length of the random bytes to generate. Default is 8.
+	 * @return string
+	 * @since 2.2.0
+	 */
+	public static function generate_unique_id( $class, $length = 8 ) {
+		// Ensure length is at least 1.
+		$length = max( 1, $length );
+
+		do {
+			$id = bin2hex( random_bytes( $length ) );
+		} while ( is_callable( [ $class, 'get' ] ) && call_user_func( [ $class, 'get' ], $id ) );
+		return $id;
+	}
+
+	/**
+	 * Log error messages to the error log.
+	 *
+	 * This function checks if error_log function exists, validates the message,
+	 * and logs it with the print_r second argument set to true.
+	 *
+	 * Logging is disabled by default. To enable logging, add this to wp-config.php:
+	 * define( 'SRFM_LOG', true );
+	 *
+	 * @param mixed  $message The error message to log. Can be string or any type.
+	 * @param string $prefix Optional prefix to add before the message. Default: 'Log :'.
+	 *
+	 * @since 2.0.0
+	 * @return void
+	 */
+	public static function srfm_log( $message, $prefix = 'Log :' ) {
+		// Check if logging is enabled via SRFM_LOG constant.
+		if ( ! defined( 'SRFM_LOG' ) ) {
+			return;
+		}
+		unset( $message, $prefix );
+	}
+
+	/**
+	 * Encodes data to base64 after JSON encoding with validation.
+	 *
+	 * This function checks if the data is non-empty and valid for JSON encoding.
+	 * If data is not valid, returns an empty string.
+	 * Otherwise, it attempts to JSON encode and then base64 encode the result.
+	 *
+	 * @param mixed $data The data to JSON encode and then base64 encode.
+	 * @return string The base64-encoded JSON string, or empty string on failure.
+	 */
+	public static function srfm_base64_json_encode( $data ) {
+		if ( empty( $data ) || ! is_array( $data ) ) {
+			return '';
+		}
+
+		$json = wp_json_encode( $data );
+		if ( false === $json || '' === $json ) {
+			return '';
+		}
+
+		// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
+		return base64_encode( $json );
 	}
 }
